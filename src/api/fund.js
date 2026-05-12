@@ -106,7 +106,7 @@ const requestFixedJsonp = (url, callbackName) => {
         });
 
     const task = fixedJsonpQueue.then(run, run);
-    fixedJsonpQueue = task.catch(() => {});
+    fixedJsonpQueue = task.catch(() => { });
     return task;
 };
 
