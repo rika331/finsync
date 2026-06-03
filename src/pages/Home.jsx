@@ -1,69 +1,60 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import SearchBox from "../components/SearchBox";
-import AssetCard from "../components/AssetCard";
-import AmountModal from "../components/AmountModal";
-import AllInsightBar from "../components/AllInsightBar";
-import DeletePopover from "../components/DeletePopover";
-import { searchFund, getFundDetail } from "../api/fund";
-import { calcDailyProfitValue } from "../utils/calc";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Plus } from "lucide-react";
+import { getFundDetail } from "../api/fund";
+import DeleteConfirmSheet from "../components/home/DeleteConfirmSheet";
+import DistributionCard from "../components/home/DistributionCard";
+import NoticeBar from "../components/home/NoticeBar";
+import PlatformTabs from "../components/home/PlatformTabs";
+import ProductCard from "../components/home/ProductCard";
+import ProductFormSheet from "../components/home/ProductFormSheet";
+import ProductSearchOverlay from "../components/home/ProductSearchOverlay";
+import SummaryCard from "../components/home/SummaryCard";
+import { PRODUCT_TYPES } from "../data/products";
+import {
+  buildProductFromFund,
+  calculateProduct,
+  createId,
+  getPlatformDistribution,
+  getPortfolioSummary,
+  getReminderText,
+  loadProducts,
+  normalizeProduct,
+  saveProducts,
+  toNumber,
+} from "../utils/product";
 
-const FUND_CODE_PATTERN = /^\d{6}$/;
-
-const isValidFundCode = (code) => FUND_CODE_PATTERN.test(String(code || ""));
-
-const normalizeFund = (fund) => ({
-  ...fund,
-  amount: Number(fund.amount || 0),
-});
+const DEFAULT_ACTIVE_TAB = "all";
 
 export default function Home() {
-  const [keyword, setKeyword] = useState("");
-  const [toast, setToast] = useState("");
-  const [editingFund, setEditingFund] = useState(null);
+  const [products, setProducts] = useState(loadProducts);
+  const [activePlatform, setActivePlatform] = useState(DEFAULT_ACTIVE_TAB);
+  const [hidden, setHidden] = useState(false);
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [formProduct, setFormProduct] = useState(null);
+  const [actionTarget, setActionTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
-  const [searchResults, setSearchResults] = useState([]);
-  const [funds, setFunds] = useState(() => {
-    const cache = localStorage.getItem("funds");
-
-    if (cache) {
-      try {
-        const cachedFunds = JSON.parse(cache);
-
-        if (Array.isArray(cachedFunds)) {
-          return cachedFunds
-            .filter((fund) => isValidFundCode(fund.code))
-            .map(normalizeFund);
-        }
-      } catch {
-        return [];
-      }
-    }
-
-    return [
-      {
-        code: "110007",
-        name: "易方达稳健收益债券A",
-        amount: 1,
-        netValue: 1,
-        dailyRate: 0,
-        updateTime: "--",
-      },
-      {
-        code: "003547",
-        name: "鹏华丰禄债券",
-        amount: 1111,
-        netValue: 1,
-        dailyRate: 0,
-        updateTime: "--",
-      },
-    ];
-  });
-  const fundsRef = useRef(funds);
+  const [toast, setToast] = useState("");
+  const [chartVersion, setChartVersion] = useState(0);
+  const productsRef = useRef(products);
   const toastTimerRef = useRef(null);
 
+  const showToast = (message) => {
+    setToast(message);
+
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast("");
+    }, 2200);
+  };
+
   useEffect(() => {
-    fundsRef.current = funds;
-  }, [funds]);
+    productsRef.current = products;
+    saveProducts(products);
+  }, [products]);
 
   useEffect(() => {
     return () => {
@@ -73,284 +64,233 @@ export default function Home() {
     };
   }, []);
 
-  // 总资产
-  const totalAssets = useMemo(() => {
-    return funds.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  }, [funds]);
+  const refreshFunds = useCallback(async () => {
+    const latest = await Promise.all(
+      productsRef.current.map(async (product) => {
+        if (product.type !== PRODUCT_TYPES.FUND || !product.code) return product;
 
-  // 今日收益
-  const totalProfit = useMemo(() => {
-    return funds.reduce((sum, item) => {
-      return sum + calcDailyProfitValue(item.amount, item.dailyRate);
-    }, 0);
-  }, [funds]);
+        const detail = await getFundDetail(product.code);
+        if (!detail) return product;
 
-  useEffect(() => {
-    if (!keyword.trim()) {
-      return;
-    }
+        return calculateProduct({
+          ...product,
+          name: detail.name || product.name,
+          netValue: detail.netValue || product.netValue,
+          dailyRate: detail.dailyRate ?? product.dailyRate,
+          updateTime: detail.updateTime || product.updateTime,
+        });
+      })
+    );
 
-    let isActive = true;
-
-    const timer = setTimeout(async () => {
-      const result = await searchFund(keyword);
-
-      if (isActive) {
-        setSearchResults(result);
-      }
-    }, 300);
-
-    return () => {
-      isActive = false;
-      clearTimeout(timer);
-    };
-  }, [keyword]);
-
-  // 自动保存
-  useEffect(() => {
-    localStorage.setItem("funds", JSON.stringify(funds));
-  }, [funds]);
-
-  // 自动刷新净值
-  useEffect(() => {
-    const fetchLatest = async () => {
-      const updated = await Promise.all(
-        fundsRef.current.map(async (fund) => {
-          const detail = await getFundDetail(fund.code);
-
-          return {
-            ...fund,
-            name: detail?.name || fund.name,
-            netValue: detail?.netValue ?? fund.netValue,
-            dailyRate: detail?.dailyRate ?? fund.dailyRate,
-            updateTime: detail?.updateTime || fund.updateTime,
-          };
-        })
-      );
-
-      setFunds(updated);
-    };
-
-    fetchLatest();
-
-    const timer = setInterval(fetchLatest, 30000);
-
-    return () => clearInterval(timer);
+    setProducts(latest);
+    setChartVersion((version) => version + 1);
   }, []);
 
-  const showToast = (message) => {
-    setToast(message);
+  useEffect(() => {
+    refreshFunds();
+    const timer = window.setInterval(refreshFunds, 30000);
+    return () => clearInterval(timer);
+  }, [refreshFunds]);
 
-    if (toastTimerRef.current) {
-      clearTimeout(toastTimerRef.current);
+  const portfolio = useMemo(() => getPortfolioSummary(products), [products]);
+  const visibleProducts = useMemo(() => {
+    if (activePlatform === DEFAULT_ACTIVE_TAB) return portfolio.products;
+    return portfolio.products.filter((item) => item.platform === activePlatform);
+  }, [activePlatform, portfolio.products]);
+  const distribution = useMemo(
+    () => getPlatformDistribution(portfolio.products),
+    [portfolio.products]
+  );
+  const reminderText = useMemo(() => getReminderText(portfolio.products), [portfolio.products]);
+
+  const validateProductForm = (form) => {
+    if (!String(form.name || "").trim()) return "请输入产品名称";
+    if (form.type === PRODUCT_TYPES.FUND && !form.code) return "基金产品缺少基金代码";
+    if (toNumber(form.currentValue) <= 0) return "请输入当前持有金额";
+    if (toNumber(form.principal) <= 0) return "请输入本金";
+    if (!form.platform) return "请选择平台";
+
+    if (form.type === PRODUCT_TYPES.FUND && form.investAmount) {
+      if (toNumber(form.investAmount) <= 0) return "定投金额需大于0";
+      if (!form.investCycle) return "请选择定投周期";
+      if (!form.startDate) return "请选择起始日期";
     }
 
-    toastTimerRef.current = setTimeout(() => {
-      setToast("");
-    }, 2200);
+    return "";
   };
 
-  const handleKeywordChange = (nextKeyword) => {
-    setKeyword(nextKeyword);
+  const submitProduct = (form) => {
+    const error = validateProductForm(form);
 
-    if (!nextKeyword.trim()) {
-      setSearchResults([]);
-    }
-  };
-
-  // 添加基金
-  const addFund = async (item) => {
-    if (!isValidFundCode(item?.code)) {
-      showToast("请选择有效基金");
+    if (error) {
+      showToast(error);
       return;
     }
 
-    const exists = funds.some((fund) => fund.code === item.code);
-
-    if (exists) {
-      setKeyword("");
-      setSearchResults([]);
-      showToast("基金已在列表中");
-      return;
-    }
-
-    const detail = await getFundDetail(item.code);
-
-    if (!detail && !item.name) {
-      showToast("暂未找到该基金");
-      return;
-    }
-
-    setFunds((prev) => [
-      ...prev,
-      {
-        code: item.code,
-        name: detail?.name || item.name,
-        amount: 0,
-        netValue: detail?.netValue ?? item.netValue ?? 0,
-        dailyRate: detail?.dailyRate ?? item.dailyRate ?? 0,
-        updateTime: detail?.updateTime || item.updateTime || "--",
-      },
-    ]);
-
-    setKeyword("");
-    setSearchResults([]);
-  };
-
-  const addFundByKeyword = async () => {
-    const text = keyword.trim();
-
-    if (!text) {
-      showToast("请输入基金代码或名称");
-      setSearchResults([]);
-      return;
-    }
-
-    if (/^\d+$/.test(text) && !isValidFundCode(text)) {
-      showToast("基金代码应为6位数字");
-      return;
-    }
-
-    const latestResults = searchResults.length > 0 ? searchResults : await searchFund(text);
-    const candidate = isValidFundCode(text)
-      ? latestResults.find((item) => item.code === text) || { code: text }
-      : latestResults[0];
-
-    if (!candidate) {
-      showToast("未找到匹配基金");
-      return;
-    }
-
-    await addFund(candidate);
-  };
-
-  // 修改持有金额
-  const updateAmount = (code, amount) => {
-    setFunds((prev) =>
-      prev.map((item) =>
-        item.code === code
-          ? {
-            ...item,
-            amount: Math.max(0, Number(amount) || 0),
-          }
-          : item
-      )
+    const nextProduct = calculateProduct(
+      normalizeProduct({
+        ...formProduct,
+        ...form,
+        name: String(form.name).trim(),
+        currentValue: toNumber(form.currentValue),
+        principal: toNumber(form.principal),
+        investAmount: form.investAmount ? toNumber(form.investAmount) : "",
+        dailyRate: toNumber(form.dailyRate),
+        netValue: toNumber(form.netValue),
+        id: formProduct?.id || createId(form.type),
+      })
     );
+
+    setProducts((prev) => {
+      const exists = prev.some((item) => item.id === nextProduct.id);
+
+      if (exists) {
+        return prev.map((item) => (item.id === nextProduct.id ? nextProduct : item));
+      }
+
+      return [...prev, nextProduct];
+    });
+
+    setFormProduct(null);
+    setSearchOpen(false);
   };
 
-  // 删除基金
-  const deleteFund = (code) => {
-    setFunds((prev) => prev.filter((item) => item.code !== code));
+  const openFundForm = async (fund) => {
+    const existing = portfolio.products.find((item) => item.code && item.code === fund.code);
+
+    if (existing) {
+      showToast("该产品已在列表中");
+      return;
+    }
+
+    const detail = await getFundDetail(fund.code);
+    setFormProduct(buildProductFromFund(detail || fund));
+    setSearchOpen(false);
   };
 
-  const isProfitUp = totalProfit >= 0;
+  const openFinanceForm = (name) => {
+    const existing = portfolio.products.some((item) => item.name === name);
+
+    if (existing) {
+      showToast("该产品已在列表中");
+      return;
+    }
+
+    setFormProduct(
+      normalizeProduct({
+        id: createId(PRODUCT_TYPES.FINANCE),
+        type: PRODUCT_TYPES.FINANCE,
+        platform: "bank",
+        name,
+      })
+    );
+    setSearchOpen(false);
+  };
+
+  const toggleExpanded = (id) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const deleteProduct = () => {
+    if (!deleteTarget) return;
+
+    setProducts((prev) => prev.filter((item) => item.id !== deleteTarget.id));
+    setDeleteTarget(null);
+  };
 
   return (
-    <div className="min-h-screen bg-[#F5F5F5]">
-      <div className="max-w-[480px] mx-auto px-3 pt-5 pb-10">
-        {/* 顶部资产卡 */}
-        <div className="rounded-[28px] bg-black px-5 pt-5 pb-6">
-          <div className="text-[14px] text-white/80 font-medium">
-            总资产
+    <div className="pixel-page">
+      <main className="pixel-shell">
+        <SummaryCard
+          hidden={hidden}
+          onToggleHidden={() => setHidden((value) => !value)}
+          totalValue={portfolio.totalValue}
+          totalProfit={portfolio.totalProfit}
+          dailyProfit={portfolio.dailyProfit}
+          onRefresh={refreshFunds}
+        />
+
+        <NoticeBar text={reminderText} hidden={hidden} />
+
+        <DistributionCard
+          items={distribution}
+          count={portfolio.products.length}
+          hidden={hidden}
+          version={chartVersion}
+        />
+
+        <section className="products-section">
+          <div className="section-title-row products-title">
+            <h2>我的产品</h2>
+            <button type="button" onClick={() => setSearchOpen(true)}>
+              <Plus size={16} />
+              添加产品
+            </button>
           </div>
 
-          <div className="mt-5 text-[28px] leading-none font-bold text-white">
-            ¥{totalAssets.toFixed(2)}
+          <PlatformTabs active={activePlatform} onChange={setActivePlatform} />
+
+          <div className="product-list">
+            {visibleProducts.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                hidden={hidden}
+                expanded={expandedIds.has(product.id)}
+                onToggle={toggleExpanded}
+                actionOpen={actionTarget === product.id}
+                onLongPress={(nextProduct) => setActionTarget(nextProduct.id)}
+                onCloseAction={() => setActionTarget(null)}
+                onEdit={() => {
+                  setFormProduct(product);
+                  setActionTarget(null);
+                }}
+                onDelete={() => {
+                  setDeleteTarget(product);
+                  setActionTarget(null);
+                }}
+              />
+            ))}
           </div>
+        </section>
+      </main>
 
-          <div className="mt-6 flex items-center">
-            <span className="text-[16px] text-white font-regular">
-              今日趋势:
-            </span>
-
-            <span
-              className={`ml-2 text-[16px] font-bold ${isProfitUp ? "text-[#FF4D4F]" : "text-[#12B981]"
-                }`}
-            >
-              {totalProfit >= 0 ? "+" : ""}
-              {totalProfit.toFixed(2)}
-            </span>
-          </div>
-        </div>
-
-        {/* 搜索 */}
-        <div className="mt-5">
-          <SearchBox
-            value={keyword}
-            onChange={handleKeywordChange}
-            results={searchResults}
-            onSelect={addFund}
-            onAdd={addFundByKeyword}
-          />
-        </div>
-
-        {/* AI 分析 */}
-        <div className="mt-5">
-          <AllInsightBar funds={funds} />
-        </div>
-
-        {/* 到期提醒 */}
-        <div className="mt-4 rounded-[16px] bg-[#fffcd0] px-4 py-4">
-          <div className="text-[15px] font-semibold text-[#333333]">
-            ⏰ 有产品即将到期，请注意查看
-          </div>
-        </div>
-
-        {/* 表头 */}
-        <div className="mt-8 flex items-center justify-between px-1">
-          <div className="text-[12px] font-regular text-[#999999]">
-            名称
-          </div>
-
-          <div className="text-[12px] font-regular text-[#999999]">
-            金额 / 昨日收益
-          </div>
-        </div>
-
-        {/* 卡片 */}
-        <div className="mt-4 space-y-4">
-          {funds.map((fund) => (
-            <AssetCard
-              key={fund.code}
-              fund={fund}
-              onDeleteClick={setDeleteTarget}
-              onEdit={(fundItem) =>
-                setEditingFund({
-                  ...fundItem,
-                })
-              }
-            />
-          ))}
-        </div>
-      </div>
-
-      {/* 修改金额弹窗 */}
-      <AmountModal
-        key={editingFund?.code ?? "closed"}
-        fund={editingFund}
-        onClose={() => setEditingFund(null)}
-        onConfirm={(code, amount) => {
-          updateAmount(code, amount);
-          setEditingFund(null);
-        }}
-      />
-
-      <DeletePopover
-        target={deleteTarget}
-        onClose={() => setDeleteTarget(null)}
-        onDelete={() => {
-          if (!deleteTarget?.fund) return;
-
-          deleteFund(deleteTarget.fund.code);
-          setDeleteTarget(null);
-        }}
-      />
-
-      {toast && (
-        <div className="fixed left-1/2 top-6 z-[60] -translate-x-1/2 rounded-[14px] bg-black px-4 py-3 text-[14px] font-medium text-white shadow-lg">
-          {toast}
-        </div>
+      {searchOpen && (
+        <ProductSearchOverlay
+          open={searchOpen}
+          existingProducts={portfolio.products}
+          onClose={() => setSearchOpen(false)}
+          onSelectFund={openFundForm}
+          onCreateFinance={openFinanceForm}
+          showToast={showToast}
+        />
       )}
+
+      {formProduct && (
+        <ProductFormSheet
+          key={formProduct.id}
+          product={formProduct}
+          onCancel={() => setFormProduct(null)}
+          onConfirm={submitProduct}
+        />
+      )}
+
+      <DeleteConfirmSheet
+        product={deleteTarget}
+        hidden={hidden}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={deleteProduct}
+      />
+
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
